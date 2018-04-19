@@ -1,0 +1,279 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>Presto Tax Optimizer</title>
+  <style>
+    #error_msg {
+      display: none;
+      color: red;
+      font-weight: bold;
+    }
+    #file_holder {
+      border: 10px dashed #ccc;
+      width: 300px;
+      height: 100px;
+      margin: 20px auto;
+      display: inline-block;
+    }
+    #file_holder.hover {
+      border: 10px dashed #333;
+    }
+    .off {
+      opacity: 0.5;
+    }
+    .pass:before {
+      content: '✔ ';
+      color: green;
+    }
+    .fail:before {
+      content: '✘ ';
+      color: red;
+    }
+    #output {
+      border: 1px solid gray;
+      border-radius: 10px;
+      font-family: monospace;
+      padding: 20px;
+    }
+  </style>
+</head>
+
+<body>
+  <p>The purpose of this tool is to find the maximum amount you can claim for the <a href="https://www.canada.ca/en/revenue-agency/services/tax/individuals/topics/about-your-tax-return/tax-return/completing-a-tax-return/deductions-credits-expenses/line-364-public-transit-amount/eligibility.html">Canadian Federal Public Transit Tax Credit</a> if you're a Presto user.  Importantly, <em>no data is uploaded anywhere, the processing happens entirely on your computer</em>.</p>
+  <p>As an interesting side note, the optimal solution involves calculating a bunch of usage periods, and then figuring out which ones to apply.  This is related to the <a href="https://en.wikipedia.org/wiki/Knapsack_problem">knapsack problem</a>, a class of problems called "NP-hard" which are difficult to solve in a reasonable amount of time (which is probably why such a feature is not available on the Presto site).</p>
+  <p id="error_msg"></p>
+  <ol>
+    <li id="browser_check" class="off">Verify browser capabilities</li>
+    <li id="export" class="off"><a href="https://www.prestocard.ca/en/about/tax-credit" target="_blank">Follow the steps</a> to export Presto data as a CSV
+    <li id="drag_drop">Once the file is downloaded, drag it into this box:<br/><div id="file_holder"></div></li>
+    <li id="parse" class="off">Parse data</li>
+    <li id="optimize" class="off">Optimize tax credits</li>
+  </ol>
+  <p id="output"></p>
+
+  <script>
+    const max_period_length = 31,
+          min_trips_in_period = 32;
+
+    function enable(step_id) {
+      let step = document.getElementById(step_id);
+      step.className = '';
+    }
+
+    function pass(step_id) {
+      let step = document.getElementById(step_id);
+      step.className = 'pass';
+    }
+      
+    function fail(step_id, msg) {
+      let error = document.getElementById('error_msg'),
+          step = document.getElementById(step_id);
+
+      error.innerHTML = msg;
+      error.style.display = 'block';
+      step.className = 'fail';
+    }
+
+    function log(msg) {
+      let output = document.getElementById('output');
+      output.appendChild(document.createTextNode(msg));
+      output.appendChild(document.createElement('br'));
+    }
+
+    if (typeof window.FileReader === 'undefined') {
+      fail('browser_check', 'Your browser does not support the FileReader API, please update it.');
+    } else {
+      pass('browser_check');
+      enable('export');
+      enable('drag_drop');
+
+      let file_holder = document.getElementById('file_holder');
+      file_holder.addEventListener('dragenter', (evt) => {
+        evt.dataTransfer.effectAllowed = "move";
+        evt.target.className = 'hover';
+        evt.preventDefault();
+      });
+      file_holder.addEventListener('dragleave', (evt) => {
+        evt.target.className = '';
+        evt.preventDefault();
+      });
+      file_holder.addEventListener('dragover', (evt) => {
+        // https://stackoverflow.com/questions/8414154/html5-drop-event-doesnt-work-unless-dragover-is-handled
+        evt.preventDefault();
+      });
+      file_holder.addEventListener('drop', (evt) => {
+        pass('export');
+
+        // Clear the output
+        document.getElementById('output').innerHTML = '';
+
+        // See: https://jsfiddle.net/oL2akhtz/
+        let file = evt.dataTransfer.files[0];
+        log(`Received ${file.name}`);
+        log(`\u00A0\u00A0 Exported ${file.lastModifiedDate}`);
+        log(`\u00A0\u00A0 Size is ${file.size} bytes`);
+
+        let reader = new FileReader();
+        reader.addEventListener('load', (evt) => {
+          pass('drag_drop');
+          enable('parse');
+          setTimeout(() => parse(evt.target.result), 100);
+        });
+        reader.addEventListener('error', (evt) => {
+          fail('drag_drop', evt.target.error.message);
+        });
+        reader.readAsText(file);
+
+        evt.target.className = '';
+        evt.preventDefault();
+      });
+    }
+
+    function parse(data) {
+      const regex = /^"0?(\d{1,2})\/0?(\d{1,2})\/(\d{4})[^"]*","([^"]*)".*Fare Payment","\(\$([0-9.]+)\)"$/gm;
+
+      let m, graph = { '_summary': { min:'9999', max:'0000', trips:0, fares:0 }};
+      while ((m = regex.exec(data)) !== null) {
+        let month = parseInt(m[1]),
+            day = parseInt(m[2]),
+            year = parseInt(m[3]),
+            agency = m[4],
+            fare = parseFloat(m[5]);
+
+        // Convert to ISO
+        let iso = year + (month < 10 ? '-0' : '-') + month + (day < 10 ? '-0' : '-') + day;
+
+        if (iso < graph._summary.min) graph._summary.min = iso;
+        if (iso > graph._summary.max) graph._summary.max = iso;
+        graph._summary.trips++;
+        graph._summary.fares += fare;
+
+        // Build the graph
+        let a = graph[agency];
+        if (!a) {
+          a = {'_summary': { min:'9999', max:'0000', trips:0, fares:0 }};
+          graph[agency] = a;
+        }
+
+        if (iso < a._summary.min) a._summary.min = iso;
+        if (iso > a._summary.max) a._summary.max = iso;
+        a._summary.trips++;
+        a._summary.fares += fare;
+
+        let d = a[iso];
+        if (!d) {
+          d = { trips:0, fares:0 };
+          a[iso] = d;
+        }
+        d.trips++;
+        d.fares += fare;
+      }
+
+      log(`Parsed ${graph._summary.trips} trips`);
+      log(`\u00A0\u00A0 Between ${graph._summary.min} and ${graph._summary.max}`);
+      log(`\u00A0\u00A0 Total paid is $${graph._summary.fares}`);
+
+      pass('parse');
+      enable('optimize');
+      setTimeout(() => optimize(graph), 100);
+    }
+
+    function optimize(graph) {
+      log(`Finding the optimal arrangement of non-overlapping periods per agency`);
+      log(`\u00A0\u00A0 Each period is at most ${max_period_length} days and contains at least ${min_trips_in_period} trips`);
+      log(`\u00A0\u00A0 We want to maximize the total fares paid over all periods`);
+
+      for (const agency of Object.keys(graph)) {
+        if (agency !== '_summary') {
+          let agency_data = graph[agency];
+          let periods = generate_periods(agency_data);
+          // Generate the main (dynamic programming) array, where
+          // the first dimension i is all the days from min to i, and
+          // the second dimension j is all the periods from 0 to j
+          // See: https://en.wikipedia.org/wiki/Knapsack_problem#Dynamic_programming_in-advance_algorithm
+          // Note: we're increasing the loop range of i by one day, as this makes handling non-overlaps easier
+          //       since every period has an "extra" day at the end.
+          let arr = {}, curr_date = agency_data._summary.min, max_date = inc(agency_data._summary.max);
+          while(curr_date <= max_date) {
+            arr[curr_date] = [ 0 ];
+            curr_date = inc(curr_date);
+          }
+
+          let i, j, p;
+          for (i = agency_data._summary.min; i <= max_date; i = inc(i)) {
+            for (j = 0; j < periods.length; j++) {
+              p = periods[j];
+              if (i <= p.end) {
+                arr[i][j+1] = arr[i][j];
+              } else {
+                arr[i][j+1] = Math.max(arr[i][j], arr[p.start][j] + p.fares);
+              }
+            }
+          }
+
+          //console.dir(arr);
+          //console.dir(periods);
+
+          log(`(${agency}) you can claim $${arr[max_date][periods.length]} out of a possible $${agency_data._summary.fares}`);
+          
+          let used_periods = backtrack(arr, periods, max_date, periods.length);
+          for (i = 0; i < used_periods.length; i++) {
+            let p = used_periods[i];
+            log(`\u00A0\u00A0 ${p.start} to ${p.end} (${p.trips} trips, $${p.fares})`);
+          }
+        }
+      }
+      pass('optimize');
+    }
+
+    function inc(date) {
+      let d = new Date(date);
+      d.setUTCDate(d.getUTCDate() + 1);
+      return d.toISOString().substring(0, 10);
+    }
+
+    function generate_periods(agency_data) {
+      let periods = [], curr_start = agency_data._summary.min;
+
+      while(curr_start <= agency_data._summary.max) {
+        let period = {
+          start: curr_start,
+          end: curr_start,
+          len: 1,
+          trips: 0,
+          fares: 0
+        };
+        while(period.len <= max_period_length) {
+          if (period.end in agency_data) {
+            let d = agency_data[period.end];
+            period.trips += d.trips;
+            period.fares += d.fares;
+            if (period.trips >= min_trips_in_period) {
+              // Clone and add to list of all periods
+              periods.push(JSON.parse(JSON.stringify(period)));
+            }
+          }
+          period.end = inc(period.end);
+          period.len++;
+        }
+        curr_start = inc(curr_start);
+      }
+
+      return periods;
+    }
+
+    function backtrack(arr, periods, i, j) {
+      if (j === 0) {
+        return [];
+      } else if (arr[i][j] > arr[i][j-1]) {
+        let p = periods[j-1];
+        let result = backtrack(arr, periods, p.start, j-1);
+        result.push(p);
+        return result;
+      } else {
+        return backtrack(arr, periods, i, j-1);
+      }
+    }
+  </script>
+</body>
+</html>
